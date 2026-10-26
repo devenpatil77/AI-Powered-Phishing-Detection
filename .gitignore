@@ -1,0 +1,52 @@
+# Python cache and environments
+
+**pycache**/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Local database
+
+email_guardian.db
+*.sqlite
+*.sqlite3
+
+# Datasets and test files
+
+archive/dataset/
+phishing_test.pdf
+test_phishing.txt
+
+# Frontend dependencies and build output
+
+node_modules/
+dist/
+.vite/
+
+# Generated archives
+
+email_guardian_next_react_frontend.zip
+# Python cache and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Local database
+email_guardian.db
+*.sqlite
+*.sqlite3
+
+# Test files
+phishing_test.pdf
+test_phishing.txt
+
+# Frontend dependencies and build output
+node_modules/
+dist/
+.vite/
+
+# Generated archive
+email_guardian_next_react_frontend.zip
