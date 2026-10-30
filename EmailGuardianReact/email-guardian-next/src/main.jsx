@@ -31,18 +31,63 @@ import {
 import "./styles.css";
 
 function App() {
-  const [file, setFile] = useState(null);
+  const [selectedReport, setSelectedReport] = useState(null);
   const [dragging, setDragging] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState(null);
+  const [file, setFile] = useState(null);
   const [tab, setTab] = useState("Overview");
   const [mobileNav, setMobileNav] = useState(false);
-  const [history, setHistory] = useState([]);
+  const [history, setHistory] = useState(() => {
+  try {
+    return JSON.parse(
+      localStorage.getItem("emailGuardianHistory") || "[]"
+    );
+  } catch {
+    return [];
+  }
+});
   const [error, setError] = useState("");
   const [historySearch, setHistorySearch] = useState("");
   const [historyFilter, setHistoryFilter] = useState("All");
-  const [settings, setSettings] = useState({ compact: false, confirmBeforeScan: true });
-  const [apiStatus, setApiStatus] = useState("Checking...");
+ const [settings, setSettings] = useState(() => {
+  try {
+    const saved = localStorage.getItem("emailGuardianSettings");
+    return saved
+      ? { compact: false, confirmBeforeScan: true, ...JSON.parse(saved) }
+      : { compact: false, confirmBeforeScan: true };
+  } catch {
+    return { compact: false, confirmBeforeScan: true };
+  }
+});
+
+const [apiStatus, setApiStatus] = useState("Checking...");
+
+useEffect(() => {
+  localStorage.setItem("emailGuardianSettings", JSON.stringify(settings));
+}, [settings]);
+useEffect(() => {
+  document.body.classList.toggle("compact-layout", settings.compact);
+
+  return () => {
+    document.body.classList.remove("compact-layout");
+  };
+}, [settings.compact]);
+
+const checkApiConnection = async () => {
+  setApiStatus("Checking...");
+  try {
+    const response = await fetch(
+      "https://email-guardian-api.deven7722.workers.dev/api/health"
+    );
+    if (!response.ok) throw new Error("API unavailable");
+    const data = await response.json();
+    if (data.status !== "healthy") throw new Error("API unhealthy");
+    setApiStatus("Connected");
+  } catch {
+    setApiStatus("Offline");
+  }
+};
 
   const mapHistoryItem = (item) => ({
     id: item.id,
@@ -58,16 +103,18 @@ function App() {
     color: (item.prediction || item.verdict) === "Phishing" ? "red" : (item.prediction || item.verdict) === "Legitimate" ? "green" : "amber",
   });
 
-  const loadHistory = async () => {
-    try {
-      const response = await fetch("http://127.0.0.1:8000/api/history?limit=100&user_id=local-user");
-      if (!response.ok) throw new Error("History request failed");
-      const data = await response.json();
-      setHistory((data.history || []).map(mapHistoryItem));
-    } catch (err) {
-      console.error("Could not load saved scan history:", err);
-    }
-  };
+  const loadHistory = () => {
+  try {
+    const savedHistory = JSON.parse(
+      localStorage.getItem("emailGuardianHistory") || "[]"
+    );
+
+    setHistory(savedHistory);
+  } catch (err) {
+    console.error("Could not load saved scan history:", err);
+    setHistory([]);
+  }
+};
 
   useEffect(() => {
     loadHistory();
@@ -106,55 +153,95 @@ function App() {
   };
 
   const scan = async () => {
-    if (!file) {
-      setError("Upload an email file first.");
-      return;
-    }
+  if (!file) {
+    setError("Upload an email file first.");
+    return;
+  }
 
-    setScanning(true);
-    setError("");
-    setResult(null);
+  if (settings.confirmBeforeScan) {
+    const confirmed = window.confirm(
+      "Are you sure you want to analyse this email?"
+    );
+    if (!confirmed) return;
+  }
 
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
+  setScanning(true);
+  setError("");
+  setResult(null);
 
-      const response = await fetch(
-        "http://127.0.0.1:8000/api/analyze",
-        {
-          method: "POST",
-          body: formData,
-        }
-      );
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "Analysis failed.");
+    const response = await fetch(
+      "https://email-guardian-api.deven7722.workers.dev/api/analyze",
+      {
+        method: "POST",
+        body: formData,
       }
+    );
 
-      setResult({
-        name: data.filename,
-        size: `${(file.size / 1024).toFixed(1)} KB`,
-        note: data.message,
-        prediction: data.prediction,
-        confidence: data.confidence,
-        subject: data.subject,
-        sender: data.sender,
-        urls: data.urls_found || [],
-        urlCount: data.url_count || 0,
-      });
+    const data = await response.json();
 
-      await loadHistory();
-    } catch (err) {
-      setError(
-        `${err.message || "Could not connect to the backend."} Check that your Python server is running on port 8000.`
+    if (!response.ok || !data.success) {
+      throw new Error(
+        data.detail || data.error || "Analysis failed."
       );
-    } finally {
-      setScanning(false);
     }
-  };
 
+    const scannedAt = data.scanned_at
+      ? new Date(data.scanned_at)
+      : new Date();
+
+    setResult({
+      name: data.filename,
+      size: `${(file.size / 1024).toFixed(1)} KB`,
+      note: data.message,
+      prediction: data.prediction,
+      confidence: data.confidence,
+      subject: data.subject,
+      sender: data.sender,
+      urls: data.urls_found || [],
+      urlCount: data.url_count || 0,
+    });
+
+    const historyItem = {
+      id: data.scan_id || Date.now(),
+      name: data.filename || file.name,
+      type: "TXT",
+      verdict: data.prediction,
+      score: `${data.confidence}%`,
+      time: scannedAt.toLocaleTimeString(),
+      date: scannedAt.toLocaleDateString(),
+      subject: data.subject || "Not available",
+      sender: data.sender || "Not available",
+      urls: data.urls_found || [],
+      color:
+        data.prediction === "Phishing"
+          ? "red"
+          : data.prediction === "Legitimate"
+          ? "green"
+          : "amber",
+    };
+
+    setHistory((previous) => {
+      const updated = [historyItem, ...previous];
+      localStorage.setItem(
+        "emailGuardianHistory",
+        JSON.stringify(updated)
+      );
+      return updated;
+    });
+
+  } catch (err) {
+    setError(
+      err.message ||
+        "Could not connect to the Email Guardian API on Cloudflare."
+    );
+  } finally {
+    setScanning(false);
+  }
+};
   const navItems = [
     ["Overview", LayoutDashboard],
     ["Email scanner", ScanSearch],
@@ -302,11 +389,259 @@ function App() {
               <div className="signal-disclaimer"><ShieldAlert size={15}/> Email Guardian does not currently perform live reputation lookups for every URL.</div>
             </section>
           ) : tab === "Reports" ? (
-            <section className="panel history-panel"><div className="section-label">REPORT CENTER</div><h2>Scan reports</h2><p>Choose a saved scan below to review its recorded details. PDF export can be added after report formatting is implemented.</p><div className="table-wrap"><table><thead><tr><th>FILE</th><th>ASSESSMENT</th><th>SCORE</th><th>DATE</th></tr></thead><tbody>{history.length ? history.map((item,index)=><tr key={item.id || index}><td>{item.name}</td><td><span className={`verdict ${item.color}`}><span/>{item.verdict}</span></td><td>{item.score}</td><td>{item.date}</td></tr>) : <tr><td colSpan="4">No reports yet. Scan an email to create a report record.</td></tr>}</tbody></table></div></section>
-          ) : tab === "Model evaluation" ? (
-            <section className="panel history-panel"><div className="section-label">MODEL QUALITY</div><h2>Model evaluation</h2><p>Evaluation metrics must be calculated from a labelled, held-out test dataset. They are not inferred from dashboard scans.</p><div className="metrics-grid">{[['Accuracy','Requires test labels'],['Precision','False-positive awareness'],['Recall','Phishing coverage'],['F1-score','Precision/recall balance']].map(([title,desc])=><div className="metric-card" key={title}><div className="metric-top"><span>{title.toUpperCase()}</span><div className="metric-icon purple"><Activity size={17}/></div></div><div className="metric-value">Pending</div><div className="metric-foot">{desc}</div></div>)}</div><p>Next step: evaluate the saved model against a separate labelled test set and display the computed confusion matrix.</p></section>
+  <section className="panel history-panel">
+    <div className="section-label">REPORT CENTER</div>
+    <h2>Scan reports</h2>
+    <p>View detailed reports generated from previously scanned emails.</p>
+
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>FILE</th>
+            <th>ASSESSMENT</th>
+            <th>CONFIDENCE</th>
+            <th>DATE</th>
+            <th>ACTION</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {history.length === 0 ? (
+            <tr>
+              <td colSpan="5">No reports available. Scan an email first.</td>
+            </tr>
+          ) : (
+            history.map((item, index) => (
+              <tr key={item.id || index}>
+                <td>{item.name}</td>
+                <td>
+                  <span className={`verdict ${item.color}`}>
+                    <span />{item.verdict}
+                  </span>
+                </td>
+                <td>{item.score}</td>
+                <td>{item.date}</td>
+                <td>
+                  <button
+                    className="view-all"
+                    onClick={() => setSelectedReport(item)}
+                  >
+                    View report
+                  </button>
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
+
+    {selectedReport && (
+      <div className="panel" style={{ marginTop: 24 }}>
+        <div className="section-label">DETAILED SCAN REPORT</div>
+        <h2>{selectedReport.name}</h2>
+
+        <p>
+          <strong>Assessment:</strong> {selectedReport.verdict}
+        </p>
+        <p>
+          <strong>Model confidence:</strong> {selectedReport.score}
+        </p>
+        <p>
+          <strong>File type:</strong> {selectedReport.type}
+        </p>
+        <p>
+          <strong>Date:</strong> {selectedReport.date}
+        </p>
+        <p>
+          <strong>Time:</strong> {selectedReport.time}
+        </p>
+        <p>
+          <strong>Subject:</strong> {selectedReport.subject}
+        </p>
+        <p>
+          <strong>Sender:</strong> {selectedReport.sender}
+        </p>
+
+        <h3>Detected URLs</h3>
+
+        {selectedReport.urls?.length > 0 ? (
+          <ul>
+            {selectedReport.urls.map((url, index) => (
+              <li key={index} style={{ overflowWrap: "anywhere" }}>
+                {url}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>No URLs detected or URL information unavailable.</p>
+        )}
+
+        <div style={{ display: "flex", gap: 12, marginTop: 20 }}>
+          <button
+            className="view-all"
+            onClick={() => {
+              const report = [
+                "EMAIL GUARDIAN - SCAN REPORT",
+                "-----------------------------",
+                `File: ${selectedReport.name}`,
+                `Assessment: ${selectedReport.verdict}`,
+                `Confidence: ${selectedReport.score}`,
+                `File type: ${selectedReport.type}`,
+                `Date: ${selectedReport.date}`,
+                `Time: ${selectedReport.time}`,
+                `Subject: ${selectedReport.subject}`,
+                `Sender: ${selectedReport.sender}`,
+                "Detected URLs:",
+                ...(selectedReport.urls || []).map(url => `- ${url}`),
+                "",
+                "This result is a model assessment, not a guarantee."
+              ].join("\n");
+
+              const blob = new Blob([report], {
+                type: "text/plain"
+              });
+
+              const link = document.createElement("a");
+              link.href = URL.createObjectURL(blob);
+              link.download = `EmailGuardian_${selectedReport.name}.txt`;
+              link.click();
+              URL.revokeObjectURL(link.href);
+            }}
+          >
+            Download report
+          </button>
+
+          <button
+            className="view-all"
+            onClick={() => setSelectedReport(null)}
+          >
+            Close report
+          </button>
+        </div>
+      </div>
+    )}
+  </section>
+  ) : tab === "Model evaluation" ? (
+            <section className="panel history-panel">
+              <div className="section-label">MODEL QUALITY &amp; ARCHITECTURE</div>
+              <h2>Model evaluation</h2>
+              <p>
+                Email Guardian uses a trained Logistic Regression classifier
+                with TF-IDF feature extraction to classify emails as phishing
+                or legitimate.
+              </p>
+
+              <div className="metrics-grid">
+                {[
+                  ["Algorithm", "Logistic Regression", "Supervised machine learning"],
+                  ["Feature extraction", "TF-IDF", "Text feature representation"],
+                  ["Vocabulary size", "44 Features", "Exported model vocabulary"],
+                  ["Classification", "Binary", "Phishing / Legitimate"],
+                ].map(([title, value, desc]) => (
+                  <div className="metric-card" key={title}>
+                    <div className="metric-top">
+                      <span>{title.toUpperCase()}</span>
+                      <div className="metric-icon purple">
+                        <Activity size={17} />
+                      </div>
+                    </div>
+                    <div className="metric-value">{value}</div>
+                    <div className="metric-foot">{desc}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ marginTop: 25 }}>
+                <div className="section-label">MODEL WORKFLOW</div>
+                <h3>Email classification pipeline</h3>
+                {[
+                  ["1", "Email input", "Upload an email text file for analysis."],
+                  ["2", "Text preprocessing", "Clean the email content and prepare text for analysis."],
+                  ["3", "TF-IDF vectorization", "Convert text into numerical features using the trained vocabulary."],
+                  ["4", "Logistic Regression", "Calculate the classification score and prediction probabilities."],
+                  ["5", "Final prediction", "Display Phishing or Legitimate with a confidence score."],
+                ].map(([number, title, desc]) => (
+                  <div className="signal-item" key={number}>
+                    <div className="signal-icon amber">{number}</div>
+                    <div>
+                      <b>{title}</b>
+                      <p>{desc}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ marginTop: 25 }}>
+                <div className="section-label">EVALUATION METRICS</div>
+                <h3>Performance evaluation status</h3>
+                <div className="metrics-grid">
+                  {[
+                    ["Accuracy", "Overall classification correctness"],
+                    ["Precision", "Correctness of phishing predictions"],
+                    ["Recall", "Coverage of actual phishing emails"],
+                    ["F1-score", "Balance between precision and recall"],
+                  ].map(([title, desc]) => (
+                    <div className="metric-card" key={title}>
+                      <div className="metric-top">
+                        <span>{title.toUpperCase()}</span>
+                        <div className="metric-icon purple">
+                          <Activity size={17} />
+                        </div>
+                      </div>
+                      <div className="metric-value">Pending</div>
+                      <div className="metric-foot">{desc}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="signal-disclaimer" style={{ marginTop: 20 }}>
+                <ShieldAlert size={15} />
+                Formal evaluation requires a separate labelled test dataset.
+                Individual scan confidence scores are not overall model accuracy.
+              </div>
+            </section>
+
           ) : tab === "Settings" ? (
-            <section className="panel history-panel"><div className="section-label">PREFERENCES</div><h2>Settings</h2><p>Local application preferences.</p><div style={{display:"grid",gap:18,marginTop:20}}><label style={{display:"flex",gap:12,alignItems:"center"}}><input type="checkbox" checked={settings.confirmBeforeScan} onChange={(e)=>setSettings(v=>({...v,confirmBeforeScan:e.target.checked}))}/> Confirm before starting a scan (preference stored for this session)</label><label style={{display:"flex",gap:12,alignItems:"center"}}><input type="checkbox" checked={settings.compact} onChange={(e)=>setSettings(v=>({...v,compact:e.target.checked}))}/> Compact layout preference (visual effect can be added later)</label><div>Backend status: <strong>{apiStatus}</strong></div><button className="view-all" onClick={()=>{loadHistory();fetch("http://127.0.0.1:8000/api/health").then(r=>{if(!r.ok)throw Error();setApiStatus("Connected")}).catch(()=>setApiStatus("Offline"));}}>Test connection <Activity size={15}/></button></div></section>
+            <section className="panel history-panel">
+              <div className="section-label">PREFERENCES</div>
+              <h2>Settings</h2>
+              <p>Local application preferences.</p>
+              <div style={{ display: "grid", gap: 18, marginTop: 20 }}>
+                <label style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={settings.confirmBeforeScan}
+                    onChange={(e) =>
+                      setSettings((v) => ({
+                        ...v,
+                        confirmBeforeScan: e.target.checked,
+                      }))
+                    }
+                  />
+                  Confirm before starting a scan (preference stored for this session)
+                </label>
+                <label style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={settings.compact}
+                    onChange={(e) =>
+                      setSettings((v) => ({
+                        ...v,
+                        compact: e.target.checked,
+                      }))
+                    }
+                  />
+                  Compact layout preference (visual effect can be added later)
+                </label>
+                <div>Backend status: <strong>{apiStatus}</strong></div>
+                <button className="view-all" onClick={checkApiConnection}>
+  Test connection <Activity size={15}/>
+</button>
+              </div>
+            </section>
           ) : tab === "Help & safety" ? (
             <section className="panel history-panel"><div className="section-label">HELP & SAFETY</div><h2>Using Email Guardian safely</h2><ul><li>Supported formats: .eml, .txt, and .pdf, up to 10 MB.</li><li>Predictions are machine-learning assessments, not guarantees.</li><li>Do not click suspicious links just to test them.</li><li>Verify requests through a separate trusted channel.</li><li>Scan history is stored in the local SQLite database for the configured local user ID; this is not a multi-account login system.</li></ul><p>Backend status: <strong>{apiStatus}</strong></p></section>
           ) : (
@@ -506,7 +841,11 @@ function App() {
               </div>
 
               {result && (
-                <div className="preview-result">
+                <div
+  className={`preview-result ${
+    result.prediction === "Phishing" ? "phishing-result" : "legitimate-result"
+  }`}
+>
                   <div className="preview-result-title">
                     {result.prediction === "Phishing" ? (
                       <ShieldAlert size={18} />
